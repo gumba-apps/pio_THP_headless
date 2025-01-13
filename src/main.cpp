@@ -12,7 +12,7 @@
 #include <Preferences.h> //Flash memory library
 
 #define SLEEP_TIME 60 // 172.8 // seconds (500samples = 24h)
-#define SENSORNUM 3
+#define SENSORNUM 2
 
 #define HELPER(x) #x
 #define STR(x) HELPER(x)
@@ -20,20 +20,20 @@
 // Humidity calibration values (add the cal value to the measured value)
 #if SENSORNUM == 1
 #define NAME GumbaTHP1
-#define HUMIDITY_CAL (75.0 - 74.93657895)
+//#define HUMIDITY_CAL (75.0 - 74.93657895)
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif SENSORNUM == 2
 #define NAME GumbaTHP2
-#define HUMIDITY_CAL (75.0 - 82.3172973)
+//#define HUMIDITY_CAL (75.0 - 82.3172973)
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif SENSORNUM == 3
 #define NAME GumbaTHP3
-#define HUMIDITY_CAL 0
+//#define HUMIDITY_CAL 0
 //(75.0 - 80.25918919)
 #define USE_BME280_PINS_8765 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif
 #define NAME GumbaTHP
-#define HUMIDITY_CAL 0.0
+//#define HUMIDITY_CAL 0.0
 #define USE_BME280_PINS_0123
 #endif
 
@@ -42,6 +42,7 @@
 float humidityCal = 0.0;
 float tempCal = 0.0;
 float pressureCal = 0.0;
+float batt = 0.0;
 
 
 // put function declarations here:
@@ -191,6 +192,40 @@ void loop()
   digitalWrite(BME_PWR, LOW); // turn BME280 off (this may turn the LED on!)
   pinMode(BME_GND, INPUT);    // remove BME280 GND connection to leave it off while toggling LED (in case BME is powered from GPIO8)
 
+
+
+  // read battery voltage
+  // (connect 180k ohms from battery to ADC pin and turn on pulldown resistor (45k) --> 5V --> )
+  
+  ///how? analogReference(AR_INTERNAL); // set reference voltage to 1.1V
+  analogReadResolution(12);      // set adc resolution to 12bit arduino
+  analogSetAttenuation(ADC_11db); // ADC_0db 0dB attenuation gives full-scale voltage 0-1.1V // For full-scale voltage 0-3.3V, use ADC_11db
+  //adcAttachPin(0);               // attach ADC pin to GPIO0
+
+  //looks like the internal pulldown is inactive when using the ADC on the same pin --> use bridge to GPIO1 and enable internal pulldown on GPIO1
+  // use 2x 180k divider and ground low end through GPIO1 (force L)
+
+  pinMode(0,INPUT); //init HiZ
+  digitalWrite(1, LOW); //drive low level to ground the low end of the voltage divider
+  pinMode(1, OUTPUT); //drive low level to ground the low end of the voltage divider
+  //pinMode(0,INPUT_PULLDOWN); //enable internal 45k pulldown resistor
+  
+  delay(1000);
+  for (int i=0;i<10;i++){
+  delay(100);
+  /*float*/ batt  = analogRead(0) *3.3 / 4095.0  ;//*((180.0+45.0)/45.0);//* 3.3; //* 2; // 2x voltage divider
+  Serial.printf("Battery(%d): %fV\n", i, batt);
+  }
+
+  pinMode(0,INPUT);
+  pinMode(1,INPUT);
+
+  // read ESP32-C3 internal temperature sensor
+
+
+
+
+
   //get cal values stored in flash memory (do it while WiFi is not connected to minimize peak current draw from battery) (read should be minimal but better here)
   //call mqttloop to poll if there was a calibration value set (this will write to flash memory if there is a cal message) - and this will draw ~100mA
   //to cal post a retained message to mqtt: mosquitto_pub.exe' -h broker.hivemq.com -p 1883 -t GumbaTHP3/SetTempCal -m -1.234567 -r
@@ -226,9 +261,9 @@ void loop()
     Serial.println();
   }
 
-
   if (WiFi.status() == WL_CONNECTED)
   {
+  //Connect to MQTT
     if (!mqttClient.connected())
     {
       Serial.print("Connecting ");
@@ -244,35 +279,36 @@ void loop()
       Serial.printf("  %s\n",STR(NAME/SetHumidityCal));
       Serial.printf("  %s\n",STR(NAME/SetPressureCal));
 
-      //mqttClient.subscribe(STR(NAME/Status));
+      mqttClient.subscribe(STR(NAME/Status));
       mqttClient.subscribe(STR(NAME/SetTempCal));
       mqttClient.subscribe(STR(NAME/SetHumidityCal));
       mqttClient.subscribe(STR(NAME/SetPressureCal));  
     }
 
-    if (!mqttClient.connected()) // mqtt still not connected
+    if (!mqttClient.connected()) // Error-blink 'MQTT still not connected'
     {
       Serial.println(">>> MQTT connection FAILED!");
+      delay(500);
       blink(4, 200, 200); // blink error for no connection to MQTT but continue
     }
-
+    else // Check for MQTT messages
+    {
+      Serial.print("Checking for MQTT Messages: ");
+      for (int i = 0; i < 5; i++)
+      {
+        Serial.printf("%d, ", i);
+        mqttClient.loop();
+        delay(100);
+      }
+      Serial.println("done.");
+    }
   }
-  else // WiFi not connected
+  else // Error-blink 'WiFi not connected'
   {
     Serial.println(">>> WiFi connection FAILED!");
-    blink(3, 200, 200);
+    delay(500);
+    blink(3, 50, 200);
   }
-
-  // Check for MQTT messages
-  Serial.println("Checking for MQTT Messages");
-  for(int i=0; i<5; i++)
-  { 
-    Serial.printf("  %d\n",i);
-    mqttClient.loop();
-    delay(100);
-  }
-  Serial.println("done.");
-
 
 
   // Get Time and Date
@@ -316,7 +352,6 @@ void loop()
   }
 
 
-
   // Post to MQTT
   if (mqttClient.connected())
   {
@@ -328,10 +363,16 @@ void loop()
     delay(100);
     mqttClient.publish(STR(NAME/Timestamp), timestamp.c_str());
     delay(100);
+    mqttClient.publish(STR(NAME/Batt), String(batt).c_str());  
     //if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
     {
       //mqttClient.publish(STR(NAME/Status), (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] + " (" + String(esp_reset_reason()) + ").").c_str());
-      mqttClient.publish(STR(NAME/Status), (String(STR(NAME started: )) + resetReasons[esp_reset_reason()] + " (" + String(esp_reset_reason()) + ") \nTcal="+String(tempCal)+"\nHcal="+String(humidityCal)+"\nPcal="+String(pressureCal) ).c_str());
+      mqttClient.publish(STR(NAME/Status), (String(STR(NAME started: )) + resetReasons[esp_reset_reason()] 
+      + " (" + String(esp_reset_reason()) 
+      + ") \nTcal="+String(tempCal)
+      +"\nHcal="+String(humidityCal)
+      +"\nPcal="+String(pressureCal)
+      +"\nBatt="+String(batt,4) ).c_str());
       delay(100);
     }
     Serial.println("Posted to MQTT:");
@@ -339,12 +380,23 @@ void loop()
     Serial.println("  "+String(STR(NAME/Humidity:))  + String(measurements.humidity+humidityCal));
     Serial.println("  "+String(STR(NAME/Pressure:))  + String((measurements.pressure / 100)+pressureCal) ); // /100 to converst Pa to mbar
     Serial.println("  "+String(STR(NAME/Timestamp:)) + timestamp);
-    Serial.println("  "+String(STR(NAME/Status:)) + (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] + " (" + String(esp_reset_reason()) + ") \nTcal="+String(tempCal)+"\nHcal="+String(humidityCal)+"\nPcal="+String(pressureCal) ).c_str());
+    Serial.println("  "+String(STR(NAME/Batt:)) + String(batt,4));
+    Serial.println("  "+String(STR(NAME/Status:)) + (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] 
+    +" (" + String(esp_reset_reason()) 
+    +") \n    Tcal="+String(tempCal)
+    +"\n    Hcal="+String(humidityCal)
+    +"\n    Pcal="+String(pressureCal) 
+    +"\n    Batt="+String(batt,4) ).c_str());
   }
-  else
+  else //Error-blink 'No MQTT connection!'
   {
-    Serial.println(">>> MQTT connection lost...");
-    blink(3, 500, 500);
+    Serial.println(">>> No MQTT connection...");
+    blink(2, 50, 100);
+    delay(250);
+    blink(2, 50, 100);
+    delay(250);
+    blink(2, 50, 100);
+    delay(250);
   }
 
   Serial.flush();
