@@ -12,7 +12,9 @@
 #include <Preferences.h> //Flash memory library
 
 #define SLEEP_TIME 60 // 172.8 // seconds (500samples = 24h)
-#define SENSORNUM 2
+#define SENSORNUM 4
+// sensornum 3=HrbrTHP
+// sensornum 4=HrbeTHP2
 
 #define HELPER(x) #x
 #define STR(x) HELPER(x)
@@ -27,10 +29,16 @@
 //#define HUMIDITY_CAL (75.0 - 82.3172973)
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif SENSORNUM == 3
-#define NAME GumbaTHP3
+//#define NAME GumbaTHP3
+#define NAME HrbrTHP
 //#define HUMIDITY_CAL 0
 //(75.0 - 80.25918919)
 #define USE_BME280_PINS_8765 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
+#elif SENSORNUM == 4
+#define NAME HrbrTHP2
+//#define HUMIDITY_CAL 0
+//(75.0 - 80.25918919)
+#define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif
 #define NAME GumbaTHP
 //#define HUMIDITY_CAL 0.0
@@ -72,12 +80,12 @@ struct WIFICREDENTIALS
 //   {"StradaDelOveste", "Voggu.Rischl.2018"},
 //   {"TeraGuest", "We Measure Quality"}
 // };
-const char *ssid = "WINGNET";
-const char *password = "2136044570448027";
+// const char *ssid = "WINGNET";
+// const char *password = "2136044570448027";
 // const char *ssid = "WingTetherNet";//"WINGNET";
 // const char *password = "Ingo.Ingo";//"2136044570448027";
-// const char* ssid = "StradaDelOveste";
-// const char* password = "Voggu.Rischl.2018";
+const char* ssid = "StradaDelOveste";
+const char* password = "Voggu.Rischl.2018";
 // const char *ssid = "TeraGuest";
 // const char *password = "We Measure Quality";
 
@@ -193,7 +201,7 @@ void loop()
   pinMode(BME_GND, INPUT);    // remove BME280 GND connection to leave it off while toggling LED (in case BME is powered from GPIO8)
 
 
-
+#ifdef READBATTERY
   // read battery voltage
   // (connect 180k ohms from battery to ADC pin and turn on pulldown resistor (45k) --> 5V --> )
   
@@ -220,8 +228,11 @@ void loop()
   pinMode(0,INPUT);
   pinMode(1,INPUT);
 
-  // read ESP32-C3 internal temperature sensor
+#endif //READBATTERY
 
+
+  // read ESP32-C3 internal temperature sensor
+  // to do...
 
 
 
@@ -283,6 +294,10 @@ void loop()
       mqttClient.subscribe(STR(NAME/SetTempCal));
       mqttClient.subscribe(STR(NAME/SetHumidityCal));
       mqttClient.subscribe(STR(NAME/SetPressureCal));  
+
+      //mqttClient.subscribe(STR(NAME/GetTemperatureHistory)); //get a persistent string with historic measurements 
+      //mqttClient.subscribe(STR(NAME/GetHumidityHistory)); //get a persistent string with historic measurements 
+      //mqttClient.subscribe(STR(NAME/GetPressureHistory)); //get a persistent string with historic measurements 
     }
 
     if (!mqttClient.connected()) // Error-blink 'MQTT still not connected'
@@ -362,8 +377,11 @@ void loop()
     mqttClient.publish(STR(NAME/Pressure), String((measurements.pressure / 100)+pressureCal).c_str()); // /100 to converst Pa to mbar
     delay(100);
     mqttClient.publish(STR(NAME/Timestamp), timestamp.c_str());
+    #ifdef READBATTERY
     delay(100);
     mqttClient.publish(STR(NAME/Batt), String(batt).c_str());  
+    #endif //READBATTERY
+
     //if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
     {
       //mqttClient.publish(STR(NAME/Status), (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] + " (" + String(esp_reset_reason()) + ").").c_str());
@@ -380,7 +398,9 @@ void loop()
     Serial.println("  "+String(STR(NAME/Humidity:))  + String(measurements.humidity+humidityCal));
     Serial.println("  "+String(STR(NAME/Pressure:))  + String((measurements.pressure / 100)+pressureCal) ); // /100 to converst Pa to mbar
     Serial.println("  "+String(STR(NAME/Timestamp:)) + timestamp);
+    #ifdef READBATTERY
     Serial.println("  "+String(STR(NAME/Batt:)) + String(batt,4));
+    #endif //READBATTERY
     Serial.println("  "+String(STR(NAME/Status:)) + (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] 
     +" (" + String(esp_reset_reason()) 
     +") \n    Tcal="+String(tempCal)
