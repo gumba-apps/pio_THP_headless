@@ -61,6 +61,7 @@ void setupBME280();
 void loop();
 void blink(int times, int onTime, int offTime);
 void callback(char* topic, byte* payload, unsigned int length);
+volatile bool incomingMsgReceived = false;
 
 
 //Flash memory
@@ -147,6 +148,37 @@ BME280 bme280;
 // #define BME_SCL 10
 // #define BME_GND 20
 // #define BME_PWR 21
+
+
+//// History buffer
+  // receive and send to and from this buffer
+  //
+  //Keep it simple for now: post tuples of epoch time(32Bit), float value(32Bit) = 8 bytes per value 
+  // (1msg/min * 60min/h * 24h/d * 365d/y = 4,204,800 Bytes)
+  // (1msg/min * 60min/h * 24h/d * 30d/month *8 bytes = 345,600)
+  // 1 week = 60*24*7 = 10,080
+  //
+  // limit of HiveMQ (Google Gemini)
+  // - Maximum message size: 5 MB per message.
+  // - 10 GB data traffic per month in total (both directions).
+  // (this limits to 5 MB per single message.)
+  //
+  // Theoretical Transfer times:
+  //  1 Mbit/s upstream connection → ~ 40 seconds (5 MB = 40 Mbit; 40 Mbit / 1 Mbit/s = 40s).
+  //  10 Mbit/s upstream → ~ 4 seconds.
+  //  100 Mbit/s upstream → ~ 0.4 s.
+
+  struct TempHistorySTRUCT{
+    unsigned long epochTime; //unsigned long (32Bit=4Byte): absolute start time in unix time
+    float Temp; // single precision floating point (32Bit)
+  };
+  union{
+    TempHistorySTRUCT Temp[60*24*7]={0};//reserve data for 1 week = 10,080 measurements
+    uint8_t TempByteBuffer[sizeof(Temp)];        //maps byte array over array of structs
+  } History;
+  volatile unsigned int numMeasReceived=0;
+
+
 
 void setup()
 {
@@ -272,10 +304,10 @@ void loop()
     Serial.println();
   }
 
+  //Connect to MQTT
   if (WiFi.status() == WL_CONNECTED)
   {
-  //Connect to MQTT
-    if (!mqttClient.connected())
+    if (!mqttClient.connected()) //connect to MQTT and Subscribe to topics
     {
       Serial.print("Connecting ");
       Serial.print(STR(NAME));
@@ -286,18 +318,24 @@ void loop()
       mqttClient.connect(STR(NAME), NULL, NULL);
 
       Serial.println("Subscribing to MQTT topics...");
+      Serial.printf("  %s\n",STR(NAME/GetTempHistory));
+      Serial.printf("  %s\n",STR(NAME/GetHumidityHistory));
+      Serial.printf("  %s\n",STR(NAME/GetPressureHistory));  
       Serial.printf("  %s\n",STR(NAME/SetTempCal));
       Serial.printf("  %s\n",STR(NAME/SetHumidityCal));
       Serial.printf("  %s\n",STR(NAME/SetPressureCal));
 
-      mqttClient.subscribe(STR(NAME/Status));
+      //subscribe to History values
+      mqttClient.subscribe(STR(NAME/GetTempHistory));
+      mqttClient.subscribe(STR(NAME/GetHumidityHistory));
+      mqttClient.subscribe(STR(NAME/GetPressureHistory));  
+
+      //subscribe to Cal messages
       mqttClient.subscribe(STR(NAME/SetTempCal));
       mqttClient.subscribe(STR(NAME/SetHumidityCal));
       mqttClient.subscribe(STR(NAME/SetPressureCal));  
+      //mqttClient.subscribe(STR(NAME/Status));
 
-      //mqttClient.subscribe(STR(NAME/GetTemperatureHistory)); //get a persistent string with historic measurements 
-      //mqttClient.subscribe(STR(NAME/GetHumidityHistory)); //get a persistent string with historic measurements 
-      //mqttClient.subscribe(STR(NAME/GetPressureHistory)); //get a persistent string with historic measurements 
     }
 
     if (!mqttClient.connected()) // Error-blink 'MQTT still not connected'
@@ -309,10 +347,12 @@ void loop()
     else // Check for MQTT messages
     {
       Serial.print("Checking for MQTT Messages: ");
-      for (int i = 0; i < 5; i++)
+      for (int i = 0; i < 6; i++)
       {
-        Serial.printf("%d, ", i);
+        incomingMsgReceived = false;
         mqttClient.loop();
+        Serial.printf("%d:", i);
+        Serial.print(incomingMsgReceived?"Msg received!":"No Msg.");
         delay(100);
       }
       Serial.println("done.");
@@ -329,6 +369,7 @@ void loop()
   // Get Time and Date
   String timestamp;
   String timeAndDate; // used to print on lcd or Terminal
+  /*time_t*/ unsigned long epochTime = 0;//0=ref time 1.1.1970 UTC //NTPClient.getEpochTime() returns number of seconds since 1.1.1970Z
   char buf[25];
   if (WiFi.status() == WL_CONNECTED)
   {
@@ -336,7 +377,7 @@ void loop()
     timeClient.begin();
     timeClient.setTimeOffset(7200); // MEZ +2h
     timeClient.update();
-    time_t epochTime = timeClient.getEpochTime();
+    epochTime = timeClient.getEpochTime();
     struct tm *ptm = gmtime((time_t *)&epochTime); // Get a time structure // int monthDay = ptm->tm_mday;
     snprintf(buf, sizeof(buf), " %3s, %2d %3s ", weekDays[timeClient.getDay()].c_str(), ptm->tm_mday, months[ptm->tm_mon].c_str());
     timeAndDate = buf;
@@ -381,6 +422,24 @@ void loop()
     delay(100);
     mqttClient.publish(STR(NAME/Batt), String(batt).c_str());  
     #endif //READBATTERY
+
+
+    //Send retained message for TempHistory
+    int numMeas;
+    for(numMeas=0;numMeas<sizeof(History.Temp)&&History.Temp[numMeas].epochTime!=0;numMeas++){
+    }
+    Serial.printf("Number of Measurements in History buffer: %d (counted: %d)\n",numMeasReceived, numMeas);
+
+    // add current measurement to History buffer
+    if (numMeasReceived <= sizeof(History.Temp)){
+      History.Temp[numMeasReceived].epochTime = epochTime;
+      History.Temp[numMeasReceived].Temp = measurements.temperature + tempCal;
+      numMeasReceived++;
+    }
+
+    //if(numMeasReceived>0)
+      mqttClient.publish(STR(NAME/GetTempHistory),History.TempByteBuffer,numMeasReceived*sizeof(History.Temp[0]),true); //ToDo: figure out size: until last element that has a time stamp >0 -> then *sizeof(History.Temp[0])
+
 
     //if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
     {
@@ -484,6 +543,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   char topicbuf[100];
   char printbuf[100];
   
+  incomingMsgReceived = true;
+  
   for(int i=0; i<length; i++) { buf[i] = payload[i];}
   // memcpy(buf, payload, length);
    buf[length] = '\0';
@@ -531,6 +592,27 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.println("Pressure calibration set to: " + String(pressureCal));
     mqttClient.publish(STR(NAME/Status), (String(STR(NAME/PressureCal set to: )) + String(pressureCal)).c_str());
     mqttClient.publish(STR(NAME/SetPressureCal), "", true); //clear retained cal message
+  }
+
+
+
+
+  if (strcmp(topicbuf, STR(NAME/GetTempHistory)) == 0) {
+    unsigned int bufLenInBytes = sizeof(History.Temp); // rem: number of elements of an array of structs: size_t count = sizeof(X) / sizeof(X[0]);
+    unsigned int bytesToCopy = 0;
+    unsigned int copyOffset = 0;
+    if( length <= (bufLenInBytes-sizeof(History.Temp[0]))){//check if TempHistory buffer still has room for another tuple
+      bytesToCopy = static_cast<unsigned int>(length/sizeof(History.Temp[0]));
+    }
+    else{ //drop first element
+      copyOffset = sizeof(History.Temp[0]);
+      bytesToCopy = length-copyOffset;
+    }
+    // for(int i=0; i<elementsToCopy; i++){
+    //     TempHistory
+    // }
+    memcpy(History.Temp,payload+copyOffset,bytesToCopy);
+    numMeasReceived=length/sizeof(History.Temp[0]);
   }
 
 }
