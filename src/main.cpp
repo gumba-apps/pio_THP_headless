@@ -11,10 +11,12 @@
 #include "Wire.h"
 #include <Preferences.h> //Flash memory library
 
+#pragma region Constants and Globals
 #define SLEEP_TIME 60 // 172.8 // seconds (500samples = 24h)
-#define SENSORNUM 4
-// sensornum 3=HrbrTHP
-// sensornum 4=HrbeTHP2
+#define SENSORNUM 5
+// sensornum 3 =HrbrTHP1
+// sensornum 4 =HrbrTHP2
+// sensornum 5 =HrbrTHP3
 
 #define HELPER(x) #x
 #define STR(x) HELPER(x)
@@ -30,7 +32,7 @@
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif SENSORNUM == 3
 //#define NAME GumbaTHP3
-#define NAME HrbrTHP
+#define NAME HrbrTHP1
 //#define HUMIDITY_CAL 0
 //(75.0 - 80.25918919)
 #define USE_BME280_PINS_8765 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
@@ -38,6 +40,11 @@
 #define NAME HrbrTHP2
 //#define HUMIDITY_CAL 0
 //(75.0 - 80.25918919)
+#define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
+#elif SENSORNUM == 5
+#define NAME HrbrTHP3
+//#define HUMIDITY_CAL 0
+//(75.0 - tbd)
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif
 #define NAME GumbaTHP
@@ -62,6 +69,7 @@ void loop();
 void blink(int times, int onTime, int offTime);
 void callback(char* topic, byte* payload, unsigned int length);
 volatile bool incomingMsgReceived = false;
+void hexDump(const void* data, uint32_t length);
 
 
 //Flash memory
@@ -148,14 +156,15 @@ BME280 bme280;
 // #define BME_SCL 10
 // #define BME_GND 20
 // #define BME_PWR 21
+#pragma endregion
 
 
-//// History buffer
+#pragma region History buffer
   // receive and send to and from this buffer
   //
   //Keep it simple for now: post tuples of epoch time(32Bit), float value(32Bit) = 8 bytes per value 
   // (1msg/min * 60min/h * 24h/d * 365d/y = 4,204,800 Bytes)
-  // (1msg/min * 60min/h * 24h/d * 30d/month *8 bytes = 345,600)
+  // (1msg/min * 60min/h * 24h/d * 30d/month * 8 bytes/msg = 345,600)
   // 1 week = 60*24*7 = 10,080
   //
   // limit of HiveMQ (Google Gemini)
@@ -168,15 +177,18 @@ BME280 bme280;
   //  10 Mbit/s upstream → ~ 4 seconds.
   //  100 Mbit/s upstream → ~ 0.4 s.
 
-  struct TempHistorySTRUCT{
+  typedef struct __attribute__((packed)) TempHistorySTRUCT{ //__attribute__ to avoid stuffing in case this will be compiled on a non 32Bit system
     unsigned long epochTime; //unsigned long (32Bit=4Byte): absolute start time in unix time
-    float Temp; // single precision floating point (32Bit)
-  };
+    float value; // single precision floating point (32Bit)
+  }TempHistorySTRUCT;
+  const unsigned int MAXMEASUREMENTS = 25;//60*24*2; //20;//60*24*7; //reserve data for 1 week = 10,080 measurements
   union{
-    TempHistorySTRUCT Temp[60*24*7]={0};//reserve data for 1 week = 10,080 measurements
-    uint8_t TempByteBuffer[sizeof(Temp)];        //maps byte array over array of structs
+    volatile TempHistorySTRUCT Temp[MAXMEASUREMENTS]={0};
+    uint8_t TempByteBuffer[MAXMEASUREMENTS*sizeof(TempHistorySTRUCT)];//[sizeof(Temp)];        //maps byte array over array of structs
   } History;
-  volatile unsigned int numMeasReceived=0;
+  volatile int numMeas=-1;
+
+#pragma endregion History buffer
 
 
 
@@ -184,7 +196,8 @@ void setup()
 {
   // read microseconds since boot
   unsigned long micros = esp_timer_get_time();
-  Serial.begin(115200);
+  //done before polling// numMeasReceived=-1;//also reset if not coming back from reset deep sleep (some sleep mode retains global variables - this happened when ESP_PD_DOMAIN_RTC_SLOW_MEM=ESP_PD_OPTION_OFF (only ESP_PD_DOMAIN_RTC_PERIPH=ESP_PD_OPTION_ON))
+  Serial.begin(115200); //266092 bytes free.
 
   pinMode(BME_GND, INPUT); // remove BME280 GND connection to leave it off while toggling LED (in case BME is powered from GPIO8)
   //digitalWrite(LED, LOW);  // turn LED on
@@ -193,6 +206,8 @@ void setup()
   if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
   {
     Serial.println("  *** Hello Gumba! ***  ");
+    Serial.printf( "I am: %s\n",STR(NAME) );
+    Serial.printf("%d bytes free.\n",ESP.getFreeHeap());
     blink(3, 500, 500);
     delay(1000);
   }
@@ -222,7 +237,6 @@ void setup()
 
 void loop()
 {
-
   // Make sensor measurements now when sensor and controller are still cold after wakeup
   // will be set in setupBME280: digitalWrite(LED, HIGH); // turn LED off  //#undef LED // Make sure to leave LED OFF while measuring if GPIO8 is used for BME280
   setupBME280(); // startup sensor and let it settle
@@ -319,16 +333,13 @@ void loop()
 
       Serial.println("Subscribing to MQTT topics...");
       Serial.printf("  %s\n",STR(NAME/GetTempHistory));
-      Serial.printf("  %s\n",STR(NAME/GetHumidityHistory));
-      Serial.printf("  %s\n",STR(NAME/GetPressureHistory));  
       Serial.printf("  %s\n",STR(NAME/SetTempCal));
       Serial.printf("  %s\n",STR(NAME/SetHumidityCal));
       Serial.printf("  %s\n",STR(NAME/SetPressureCal));
 
       //subscribe to History values
-      mqttClient.subscribe(STR(NAME/GetTempHistory));
-      mqttClient.subscribe(STR(NAME/GetHumidityHistory));
-      mqttClient.subscribe(STR(NAME/GetPressureHistory));  
+      mqttClient.subscribe(STR(NAME/GetTempHistory),1);
+
 
       //subscribe to Cal messages
       mqttClient.subscribe(STR(NAME/SetTempCal));
@@ -346,13 +357,15 @@ void loop()
     }
     else // Check for MQTT messages
     {
-      Serial.print("Checking for MQTT Messages: ");
-      for (int i = 0; i < 6; i++)
+      numMeas=-1;
+      Serial.print("Checking for MQTT Messages:\n");
+      for (int i = 0; i < 10; i++)
       {
         incomingMsgReceived = false;
+        Serial.printf("  %d:", i);
         mqttClient.loop();
-        Serial.printf("%d:", i);
-        Serial.print(incomingMsgReceived?"Msg received!":"No Msg.");
+        //Serial.print(incomingMsgReceived?"Msg received!\n":"No Msg.\n");
+        if (incomingMsgReceived==false) Serial.print("No Msg.\n");
         delay(100);
       }
       Serial.println("done.");
@@ -411,7 +424,7 @@ void loop()
   // Post to MQTT
   if (mqttClient.connected())
   {
-    mqttClient.publish(STR(NAME/Temp), String(measurements.temperature+tempCal).c_str());
+    mqttClient.publish(STR(NAME/Temp), String(measurements.temperature + tempCal).c_str());
     delay(100);
     mqttClient.publish(STR(NAME/Humidity), String(measurements.humidity + humidityCal).c_str());
     delay(100);
@@ -423,49 +436,82 @@ void loop()
     mqttClient.publish(STR(NAME/Batt), String(batt).c_str());  
     #endif //READBATTERY
 
+#pragma region Send New History
+    //Update retained message for TempHistory
+    // note: sizeof(History.Temp) returns the number of bytes that the Temp Struct array allocates
+    // now use #define MAXMEASUREMENTS: size_t maxMeasurements = sizeof(History.Temp) / sizeof(History.Temp[0]);
 
-    //Send retained message for TempHistory
-    int numMeas;
-    for(numMeas=0;numMeas<sizeof(History.Temp)&&History.Temp[numMeas].epochTime!=0;numMeas++){
+    int numMeasCounted;//count number of tuples in TempStruct array and determine how many there are (now tracked by global numMeasReceived)
+    for(numMeasCounted=0;numMeasCounted < MAXMEASUREMENTS && History.Temp[numMeasCounted].epochTime!=0;numMeasCounted++){}
+    Serial.printf("Number of Measurements in History buffer: %d (counted: %d)\n",numMeas, numMeasCounted);
+    Serial.printf("numMeasurementsReceived=%d (max:%d)\n",numMeas,MAXMEASUREMENTS);
+    Serial.printf("Record length:%d\n",sizeof(TempHistorySTRUCT));
+    
+    if (numMeas >= 0)
+    //numMeasReceived logic: only append a message if somethinggot received 
+    // numMeasReceived =-1: no retained message received - cannot append - skip sending Histroy
+    // numMeasReceived >=1 (>0): messages in History buffer - append current measurement and send updated retained message
+    // numMeasReceived =0: a message with a "clear command" was received - start collecting  
+    //                    (numMeasReceived =0 gets set in the callback when any message that is shorter than sizeof(HistoryStruct)(=2*8) bytes was received)
+    {
+      //if (numMeasReceived < MAXMEASUREMENTS - 1){
+        History.Temp[numMeas].epochTime = epochTime;
+        History.Temp[numMeas].value = measurements.temperature + tempCal;
+        numMeas++;
+        Serial.printf("\nNew measurement #%d added...\n",numMeas);
+        //History.Temp[numMeasReceived+1].epochTime = 0;
+        //History.Temp[numMeasReceived+1].value = 0;
+
+      //}
+      
+      //send 
+      unsigned long bytesToSend = numMeas * sizeof(TempHistorySTRUCT);
+
+      //can't do this - this will end up in a loop with numMeas=-1
+      // mqttClient.publish(STR(NAME/GetTempHistory), "", true);
+      // for(int i=0;i<10;i++){
+      //   mqttClient.loop();
+      //   delay(100);
+      // }
+
+      mqttClient.publish(STR(NAME/GetTempHistory), (const uint8_t*)History.TempByteBuffer, bytesToSend, true);
+     
+      Serial.printf("History: %d of %d messages posted to MQTT (%d bytes sent):\n",numMeas,MAXMEASUREMENTS,bytesToSend);
+      hexDump(History.TempByteBuffer,numMeas*sizeof(TempHistorySTRUCT));
     }
-    Serial.printf("Number of Measurements in History buffer: %d (counted: %d)\n",numMeasReceived, numMeas);
-
-    // add current measurement to History buffer
-    if (numMeasReceived <= sizeof(History.Temp)){
-      History.Temp[numMeasReceived].epochTime = epochTime;
-      History.Temp[numMeasReceived].Temp = measurements.temperature + tempCal;
-      numMeasReceived++;
-    }
-
-    //if(numMeasReceived>0)
-      mqttClient.publish(STR(NAME/GetTempHistory),History.TempByteBuffer,numMeasReceived*sizeof(History.Temp[0]),true); //ToDo: figure out size: until last element that has a time stamp >0 -> then *sizeof(History.Temp[0])
-
+#pragma endregion Send New History
 
     //if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
-    {
+    //{
       //mqttClient.publish(STR(NAME/Status), (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] + " (" + String(esp_reset_reason()) + ").").c_str());
-      mqttClient.publish(STR(NAME/Status), (String(STR(NAME started: )) + resetReasons[esp_reset_reason()] 
+      String statusMsg = (String(STR(NAME started: )) + resetReasons[esp_reset_reason()] 
       + " (" + String(esp_reset_reason()) 
       + ") \nTcal="+String(tempCal)
       +"\nHcal="+String(humidityCal)
       +"\nPcal="+String(pressureCal)
-      +"\nBatt="+String(batt,4) ).c_str());
+      +"\nBatt="+String(batt,4))
+      +"\nMeas sent:"+String(numMeas);
+      mqttClient.publish(STR(NAME/Status),statusMsg.c_str()); 
       delay(100);
-    }
-    Serial.println("Posted to MQTT:");
-    Serial.println("  "+String(STR(NAME/Temp:))  + String(measurements.temperature+tempCal));
-    Serial.println("  "+String(STR(NAME/Humidity:))  + String(measurements.humidity+humidityCal));
-    Serial.println("  "+String(STR(NAME/Pressure:))  + String((measurements.pressure / 100)+pressureCal) ); // /100 to converst Pa to mbar
-    Serial.println("  "+String(STR(NAME/Timestamp:)) + timestamp);
+      //}
+      
+      Serial.println("Posted to MQTT:");
+      Serial.println("  "+String(STR(NAME/Temp:))  + String(measurements.temperature+tempCal));
+      Serial.println("  "+String(STR(NAME/Humidity:))  + String(measurements.humidity+humidityCal));
+      Serial.println("  "+String(STR(NAME/Pressure:))  + String((measurements.pressure / 100)+pressureCal) ); // /100 to converst Pa to mbar
+      Serial.println("  "+String(STR(NAME/Timestamp:)) + timestamp);
     #ifdef READBATTERY
     Serial.println("  "+String(STR(NAME/Batt:)) + String(batt,4));
     #endif //READBATTERY
-    Serial.println("  "+String(STR(NAME/Status:)) + (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] 
-    +" (" + String(esp_reset_reason()) 
-    +") \n    Tcal="+String(tempCal)
-    +"\n    Hcal="+String(humidityCal)
-    +"\n    Pcal="+String(pressureCal) 
-    +"\n    Batt="+String(batt,4) ).c_str());
+    Serial.printf("  %s\n",statusMsg.c_str());
+    // Serial.println("  "+String(STR(NAME/Status:)) + (String(STR(NAME has been started. Reset reason: )) + resetReasons[esp_reset_reason()] 
+    // +" (" + String(esp_reset_reason()) 
+    // +") \n    Tcal="+String(tempCal)
+    // +"\n    Hcal="+String(humidityCal)
+    // +"\n    Pcal="+String(pressureCal) 
+    // +"\n    Batt="+String(batt,4) ).c_str());
+    
+    ///numMeas=-1;//ready to receive new message
   }
   else //Error-blink 'No MQTT connection!'
   {
@@ -539,29 +585,23 @@ void blink(int times, int onTime, int offTime)
 
 
 void callback(char* topic, byte* payload, unsigned int length) {
-  char buf[length+1];
-  char topicbuf[100];
-  char printbuf[100];
-  
+  //char buf[length+1];
+  //char topicbuf[100];
+  //char printbuf[100];
+  //String msg((char*)payload, length);  // length-limited constructor
+  String topicstr((char*)topic, 100);  // length-limited constructor
+  Serial.printf("->Callback called with topic '%s'\n",topicstr.c_str());
+
   incomingMsgReceived = true;
-  
-  for(int i=0; i<length; i++) { buf[i] = payload[i];}
-  // memcpy(buf, payload, length);
-   buf[length] = '\0';
-  strncpy(topicbuf, topic, 99);
 
-  snprintf(printbuf, 99, "Callback called[%s]:%s\0\0", topic, buf);
-  Serial.println(printbuf);
-  mqttClient.publish(STR(NAME/Status), printbuf);
-
-  Serial.println("Checking...");
-  Serial.println(STR(NAME/SetTempCal));
-  Serial.println(topic); //doesn't print the topic string! (output:"0>")
-  Serial.println(topicbuf);//this works
+  // // //payload buffer & buf are OK
+  // // mqttClient.publish(STR(NAME/Status), printbuf);//this corrupts the payload buffer!
+  // // //payload buffer has been corrupted here!
 
   // Compare if topic is NAME/SetTempCal
-  if (strcmp(topicbuf, STR(NAME/SetTempCal)) == 0) {
-    tempCal = atof(buf);
+  if (strcmp(topic, STR(NAME/SetTempCal)) == 0) {
+    String msg((char*)payload, length);  // length-limited constructor
+    tempCal = msg.toFloat();// atof((char*)payload);//(buf);
     //write to flash memory
     preferences.begin(STR(NAME), false);
     preferences.putFloat("TempCal", tempCal);
@@ -571,9 +611,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
     mqttClient.publish(STR(NAME/SetTempCal), "", true); //clear retained cal message
   }
   // compare if topic is NAME/SetHumidityCal
-  //if (strcmp(topic, STR(NAME/SetHumidityCal)) == 0) {
-  if (strcmp(topicbuf, STR(NAME/SetHumidityCal)) == 0) {    
-    humidityCal = atof(buf);
+  if (strcmp(topic, STR(NAME/SetHumidityCal)) == 0) {   
+    String msg((char*)payload, length);  // length-limited constructor
+    humidityCal = msg.toFloat();//atof(buf);
     //write to flash memory
     preferences.begin(STR(NAME), false);
     preferences.putFloat("HumidityCal", humidityCal);
@@ -583,36 +623,76 @@ void callback(char* topic, byte* payload, unsigned int length) {
     mqttClient.publish(STR(NAME/SetHumidityCal), "", true); //clear retained cal message
   }
   // if (strcmp(topic, String(STR(NAME/SetPressureCal)).c_str()) == 0) {
-  if (strcmp(topicbuf, STR(NAME/SetPressureCal)) == 0) {
-    pressureCal = atof(buf);
-    //write to flash memory
+  if (strcmp(topic, STR(NAME/SetPressureCal)) == 0) {
+    String msg((char*)payload, length);  // length-limited constructor    pressureCal = msg.toFloat();//atof(buf);
+    // write to flash memory
     preferences.begin(STR(NAME), false);
     preferences.putFloat("PressureCal", pressureCal);
     preferences.end();
     Serial.println("Pressure calibration set to: " + String(pressureCal));
-    mqttClient.publish(STR(NAME/Status), (String(STR(NAME/PressureCal set to: )) + String(pressureCal)).c_str());
-    mqttClient.publish(STR(NAME/SetPressureCal), "", true); //clear retained cal message
+    mqttClient.publish(STR(NAME/Status), (String(STR(NAME/PressureCal set to:)) + String(pressureCal)).c_str());
+    mqttClient.publish(STR(NAME/SetPressureCal), "", true); // clear retained cal message
   }
 
-
-
-
-  if (strcmp(topicbuf, STR(NAME/GetTempHistory)) == 0) {
-    unsigned int bufLenInBytes = sizeof(History.Temp); // rem: number of elements of an array of structs: size_t count = sizeof(X) / sizeof(X[0]);
-    unsigned int bytesToCopy = 0;
-    unsigned int copyOffset = 0;
-    if( length <= (bufLenInBytes-sizeof(History.Temp[0]))){//check if TempHistory buffer still has room for another tuple
-      bytesToCopy = static_cast<unsigned int>(length/sizeof(History.Temp[0]));
+#pragma region Receive History
+  if (strcmp(topic, STR(NAME/GetTempHistory)) == 0) {
+    // set numMeas{Received} =0: when a message contains "clr"
+    // all messages that are shorter than sizeof(HistoryStruct)(=2*8) bytes will be ignored.
+    // if this message never got received, then numMeasReceived =-1; as initialized in setup(); -> this will prohibit an update post above
+    // if (strcmp((char*)payload, "ign") == 0) {
+    // if (length < sizeof(TempHistorySTRUCT)){
+    if (strcmp((char *)payload, "clr") == 0){
+      Serial.println("Received 'clr': Clearing History buffer.");
+      numMeas = 0;
+      History.Temp[numMeas].epochTime = 0;
+      History.Temp[numMeas].value = 0;
+      return;
     }
-    else{ //drop first element
-      copyOffset = sizeof(History.Temp[0]);
-      bytesToCopy = length-copyOffset;
-    }
-    // for(int i=0; i<elementsToCopy; i++){
-    //     TempHistory
-    // }
-    memcpy(History.Temp,payload+copyOffset,bytesToCopy);
-    numMeasReceived=length/sizeof(History.Temp[0]);
-  }
+    ////if(length>=sizeof(TempHistorySTRUCT)){//skip all empty and too short messages
+    else{
+      unsigned int bufLenInBytes = sizeof(History.Temp); // rem: number of elements of an array of structs: size_t count = sizeof(X) / sizeof(X[0]);
+      unsigned int bytesToCopy = 0;
+      unsigned int copyOffset = 0;
+      if (length <= (bufLenInBytes - sizeof(TempHistorySTRUCT))){ // check if TempHistory buffer still has room for another tuple
+        copyOffset = 0;
+        bytesToCopy = length; // static_cast<unsigned int>(length/sizeof(History.Temp[0]));
+        Serial.printf("Still room in history array. copyOffset=%d, payload: %d bytes, history buf: %d bytes - bytes to copy:%d\n",copyOffset,length, bufLenInBytes, bytesToCopy);
+      }
+      else{ // drop first element
+        copyOffset = sizeof(TempHistorySTRUCT);
+        bytesToCopy = length - copyOffset;
+        Serial.printf("Dropping first element! copyOffset=%d, payload: %d bytes, history buf: %d bytes - bytes to copy:%d\n",copyOffset, length, bufLenInBytes, bytesToCopy);
+      }
 
+      Serial.printf("memcopy: %d bytes, offset:%d\n", bytesToCopy, copyOffset);
+      Serial.printf("Target bufLenInBytes:%d, record size:%d, numRecords:%d\n", bufLenInBytes, sizeof(TempHistorySTRUCT), bufLenInBytes / sizeof(TempHistorySTRUCT));
+      memcpy(History.TempByteBuffer, payload + copyOffset, bytesToCopy);
+
+      Serial.printf("Memcopy raw: (offset:%d)\n",copyOffset);
+      hexDump(payload,length);
+      Serial.printf("Memcopy Target: (numMeas:%d)\n",numMeas);
+      hexDump(History.TempByteBuffer,bytesToCopy);
+
+
+      // Serial.printf("Before:\n");
+      // hexDump(History.TempByteBuffer,length);
+
+      if (copyOffset > 0){ //(numMeas <= MAXMEASUREMENTS){ // clear element after last to indicate end of measurements in array (should be optional)
+        History.Temp[numMeas].epochTime = 0;
+        History.Temp[numMeas].value = 0;
+      }
+
+      numMeas = bytesToCopy / sizeof(TempHistorySTRUCT);
+      Serial.printf("Received %d bytes. Copied %d measurements\n", length, numMeas);
+
+      // Serial.printf("After:\n");
+      // hexDump(History.TempByteBuffer,length);
+    }
+    #pragma endregion Receive History
+
+  } // GetTempHistory
+
+  //Post status (at end!)
+  //mqttClient.publish(STR(NAME/Status), printbuf);//this corrupts the payload buffer! (call at end)
 }
+
