@@ -11,12 +11,26 @@
 #include "Wire.h"
 #include <Preferences.h> //Flash memory library
 
+
+
+#include <InfluxDbClient.h>
+#include <InfluxDbCloud.h>
+// created from https://eu-central-1-1.aws.cloud2.influxdata.com/orgs/c77989a2f9f581e2/new-user-setup/arduino
+#define INFLUXDB_URL "https://eu-central-1-1.aws.cloud2.influxdata.com"
+#define INFLUXDB_TOKEN "r1LYXVQWqVJh-xAcvCyGdu8295im3fkEa_5Oru5fRtS6LvMd4cUJ-wcPIglB_d7xKDPtsdffkNeFgIBXkMpFrg=="
+#define INFLUXDB_ORG "c77989a2f9f581e2"
+#define INFLUXDB_BUCKET "HrbrBucket"
+// InfluxDB client instance with preconfigured InfluxCloud certificate
+InfluxDBClient client(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
+// Declare Data point
+Point point("HrbrTHP");
+
 #pragma region Constants and Globals
 #define SLEEP_TIME 60 // 172.8 // seconds (500samples = 24h)
 #define SENSORNUM 5
-// sensornum 3 =HrbrTHP1
-// sensornum 4 =HrbrTHP2
-// sensornum 5 =HrbrTHP3
+// sensornum 3 =HrbrTHP1 (Wohnzimmer)
+// sensornum 4 =HrbrTHP2 (WC_oben)
+// sensornum 5 =HrbrTHP3 (WC_unten)
 
 #define HELPER(x) #x
 #define STR(x) HELPER(x)
@@ -33,16 +47,19 @@
 #elif SENSORNUM == 3
 //#define NAME GumbaTHP3
 #define NAME HrbrTHP1
+#define ROOM Wohnzimmer
 //#define HUMIDITY_CAL 0
 //(75.0 - 80.25918919)
 #define USE_BME280_PINS_8765 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif SENSORNUM == 4
 #define NAME HrbrTHP2
+#define ROOM WC_oben
 //#define HUMIDITY_CAL 0
 //(75.0 - 80.25918919)
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
 #elif SENSORNUM == 5
 #define NAME HrbrTHP3
+#define ROOM WC_unten
 //#define HUMIDITY_CAL 0
 //(75.0 - tbd)
 #define USE_BME280_PINS_5678 // beware, GPIO8 is connected to LED and GPIO9 to the Boot button
@@ -51,6 +68,8 @@
 //#define HUMIDITY_CAL 0.0
 #define USE_BME280_PINS_0123
 #endif
+
+
 
 // Global variables
 // RTC_DATA_ATTR int bootCount = 0;
@@ -398,6 +417,43 @@ void loop()
     timeAndDate += buf;
     snprintf(buf, sizeof(buf), "%4d-%02d-%02d %02d:%02d:%02d", ptm->tm_year + 1900, ptm->tm_mon, ptm->tm_mday, ptm->tm_hour, ptm->tm_min, ptm->tm_sec);
     timestamp = buf;
+
+    #pragma region InfluxDB
+    //timeSync("UTC1","pool.ntp.org","time.nis.gov");
+    ////Post measurements to InfluxDB
+        // Check server connection
+    if (client.validateConnection()) {
+      Serial.print("Connected to InfluxDB: ");
+      Serial.println(client.getServerUrl());
+
+      point.addTag("sensor", STR(NAME));
+      point.addTag("room", STR(ROOM));
+      point.addTag("SSID", WiFi.SSID());
+
+      point.clearFields(); //optional here, neede for running in loop() to reuse measurement point
+      point.addField("Temperature",measurements.temperature + tempCal);
+      point.addField("Humidity",measurements.humidity + humidityCal);
+      point.addField("Pressure",measurements.pressure + pressureCal);
+      point.addField("RSSI",WiFi.RSSI());
+      
+      Serial.println("Sending to InFluxDB:");
+      Serial.println(point.toLineProtocol());
+
+      if(!client.writePoint(point)){
+        Serial.print("InfluxDB write failed:");
+        Serial.println(client.getLastErrorMessage());
+      }
+      else{
+        Serial.println("InfluxDB write SUCCEEDED!");
+      }
+
+
+    } else {
+      Serial.print("InfluxDB connection failed: ");
+      Serial.println(client.getLastErrorMessage());
+    }
+    #pragma endregion InfluxDB
+
   }
   else
   {
