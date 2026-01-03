@@ -433,7 +433,7 @@ void loop()
       point.clearFields(); //optional here, neede for running in loop() to reuse measurement point
       point.addField("Temperature",measurements.temperature + tempCal);
       point.addField("Humidity",measurements.humidity + humidityCal);
-      point.addField("Pressure",measurements.pressure + pressureCal);
+      point.addField("Pressure",(measurements.pressure / 100)+pressureCal);
       point.addField("RSSI",WiFi.RSSI());
       
       Serial.println("Sending to InFluxDB:");
