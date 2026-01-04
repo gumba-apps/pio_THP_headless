@@ -12,7 +12,6 @@
 #include <Preferences.h> //Flash memory library
 
 
-
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
 // created from https://eu-central-1-1.aws.cloud2.influxdata.com/orgs/c77989a2f9f581e2/new-user-setup/arduino
@@ -77,6 +76,8 @@ float humidityCal = 0.0;
 float tempCal = 0.0;
 float pressureCal = 0.0;
 float batt = 0.0;
+float junctionTempOnEntry=-999; //Die Temp on start
+float junctionTempOnExit=-999; //Die Temp after WLAN and MQTT connection
 
 
 // put function declarations here:
@@ -215,13 +216,15 @@ void setup()
 {
   // read microseconds since boot
   unsigned long micros = esp_timer_get_time();
+  junctionTempOnEntry=temperatureRead();
+  
   //done before polling// numMeasReceived=-1;//also reset if not coming back from reset deep sleep (some sleep mode retains global variables - this happened when ESP_PD_DOMAIN_RTC_SLOW_MEM=ESP_PD_OPTION_OFF (only ESP_PD_DOMAIN_RTC_PERIPH=ESP_PD_OPTION_ON))
   Serial.begin(115200); //266092 bytes free.
-
+  
   pinMode(BME_GND, INPUT); // remove BME280 GND connection to leave it off while toggling LED (in case BME is powered from GPIO8)
   //digitalWrite(LED, LOW);  // turn LED on
   //pinMode(LED, OUTPUT);
-
+  
   if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
   {
     Serial.println("  *** Hello Gumba! ***  ");
@@ -230,6 +233,7 @@ void setup()
     blink(3, 500, 500);
     delay(1000);
   }
+  Serial.printf("Junction Temp on entry:%fC\n",junctionTempOnEntry);
 
 #ifdef SLEEP_TIME
   loop(); // call loop once if we go to deep sleep
@@ -430,12 +434,19 @@ void loop()
       point.addTag("room", STR(ROOM));
       point.addTag("SSID", WiFi.SSID());
 
-      point.clearFields(); //optional here, neede for running in loop() to reuse measurement point
+      point.clearFields(); //optional here, needed for running in loop() to reuse measurement point
       point.addField("Temperature",measurements.temperature + tempCal);
       point.addField("Humidity",measurements.humidity + humidityCal);
       point.addField("Pressure",(measurements.pressure / 100)+pressureCal);
       point.addField("RSSI",WiFi.RSSI());
-      
+      point.addField("JunctionTempOnEntry",junctionTempOnEntry);
+      junctionTempOnExit = temperatureRead();
+      Serial.printf("Junction Temp after connect:%fC\n",junctionTempOnExit);
+      point.addField("JunctionTempOnExit",junctionTempOnExit);
+      Serial.printf("Junction Temp delta:%fC\n",junctionTempOnExit-junctionTempOnEntry);
+      point.addField("JunctionTempDelta", junctionTempOnExit-junctionTempOnEntry);
+
+
       Serial.println("Sending to InFluxDB:");
       Serial.println(point.toLineProtocol());
 
